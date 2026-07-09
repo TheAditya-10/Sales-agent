@@ -1,11 +1,14 @@
 import json
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 HANDOFF_RE = re.compile(
@@ -19,6 +22,15 @@ class SearchResult:
     title: str
     url: str
     content: str
+
+
+@dataclass(frozen=True)
+class DoubtDetection:
+    category: str
+    extracted_query: str
+
+
+retrieval_cache: dict[tuple[str, str], list[SearchResult]] = {}
 
 
 def normalize_query(query: str) -> str:
@@ -58,6 +70,76 @@ async def split_doubts(message: str, settings: Settings) -> list[str]:
     parts = re.split(r"\?|(?:\s+and\s+)|(?:\s*,\s*)", message)
     doubts = [part.strip(" .?!") for part in parts if len(part.strip(" .?!")) > 2]
     return (doubts or [message.strip()])[:3]
+
+
+async def answer_doubts_with_retrieval(
+    car_context: str,
+    doubts: list[str],
+    settings: Settings,
+    *,
+    on_status: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> list[dict[str, str]]:
+    answers: list[dict[str, str]] = []
+    for index, doubt in enumerate(doubts, start=1):
+        normalized = normalize_query(doubt)
+        cache_key = (car_context.strip().lower(), normalized)
+
+        if on_status:
+            await on_status(
+                {
+                    "status": "searching_web",
+                    "doubt": doubt,
+                    "index": index,
+                    "total": len(doubts),
+                }
+            )
+
+        if cache_key in retrieval_cache:
+            results = retrieval_cache[cache_key]
+        else:
+            try:
+                results = await retrieve_web(car_context, doubt, settings)
+            except Exception:
+                results = []
+            retrieval_cache[cache_key] = results
+
+        if on_status:
+            await on_status({"status": "comparing_specs", "doubt": doubt})
+            await on_status({"status": "synthesizing", "doubt": doubt})
+
+        answer = await synthesize_answer(car_context, doubt, results, settings)
+        answers.append({"doubt": doubt, "answer": answer})
+
+    return answers
+
+
+async def detect_car_buying_doubt(text: str, settings: Settings) -> DoubtDetection | None:
+    prompt = (
+        "You are listening to a car-buying call. Decide whether the transcript "
+        "contains a recognizable car-buying doubt or objection. Examples include "
+        "price, EMI, mileage, safety, ADAS, space, resale, maintenance, delivery, "
+        "comparison, variant confusion, features, or trust objections. Return only "
+        "JSON: null if there is no clear doubt; otherwise "
+        "{\"category\":\"short_snake_case_category\",\"extracted_query\":\"the buyer's concrete doubt\"}.\n\n"
+        f"Transcript window:\n{text}"
+    )
+    raw = await call_gemini(prompt, settings, expect_json=True)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    category = str(parsed.get("category") or "").strip().lower()
+    extracted_query = str(parsed.get("extracted_query") or "").strip()
+    if not category or not extracted_query:
+        return None
+    category = re.sub(r"[^a-z0-9_]+", "_", category).strip("_")[:80]
+    if not category:
+        return None
+    return DoubtDetection(category=category, extracted_query=extracted_query)
 
 
 async def retrieve_web(
@@ -156,29 +238,60 @@ async def call_gemini(
     if not settings.gemini_api_key:
         return ""
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
-    )
     body: dict[str, Any] = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 700,
+            # Gemini 2.5 models default to spending most of maxOutputTokens on
+            # internal "thinking" tokens, which was silently truncating every
+            # synthesized answer to a sentence fragment. These calls are simple
+            # classification/synthesis tasks that don't need extended reasoning.
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     if expect_json:
         body["generationConfig"]["responseMimeType"] = "application/json"
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, json=body)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPError:
-        return ""
+    async with httpx.AsyncClient(timeout=30) as client:
+        for model in gemini_model_candidates(settings.gemini_model):
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent?key={settings.gemini_api_key}"
+            )
+            try:
+                response = await client.post(url, json=body)
+                if response.status_code == 404:
+                    logger.warning("Gemini model %s is unavailable; trying fallback", model)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {400, 404}:
+                    logger.warning(
+                        "Gemini model %s failed with %s; trying fallback",
+                        model,
+                        exc.response.status_code,
+                    )
+                    continue
+                return ""
+            except httpx.HTTPError:
+                return ""
 
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError, TypeError):
-        return ""
+            try:
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError, TypeError):
+                return ""
+
+    return ""
+
+
+def gemini_model_candidates(configured_model: str) -> list[str]:
+    configured = configured_model.removeprefix("models/").strip()
+    candidates = [
+        configured,
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+    ]
+    return list(dict.fromkeys(model for model in candidates if model))

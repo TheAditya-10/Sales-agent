@@ -3,6 +3,7 @@
 import { FormEvent, useMemo, useRef, useState } from "react";
 import { Bot, ChevronDown, Send, Sparkles, X } from "lucide-react";
 import { API_URL } from "@/lib/api";
+import { SalesStoryCard } from "@/components/SalesStoryCard";
 
 type Answer = { doubt: string; answer: string };
 type Message =
@@ -277,14 +278,7 @@ function ChatMessage({ message }: { message: Message }) {
     return (
       <div className="space-y-3">
         {message.answers.map((answer) => (
-          <div key={answer.doubt} className="rounded-lg border border-outline-variant bg-white p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="font-mono text-[10px] uppercase text-secondary">Sales story</span>
-              <Sparkles size={14} className="text-primary" />
-            </div>
-            <p className="mb-2 text-sm font-semibold text-primary">{answer.doubt}</p>
-            <p className="text-sm leading-6 text-on-surface-variant">{answer.answer}</p>
-          </div>
+          <SalesStoryCard key={answer.doubt} card={answer} />
         ))}
       </div>
     );

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Filter, Search } from "lucide-react";
-import { API_URL, Lead } from "@/lib/api";
+import { ChevronLeft, ChevronRight, Filter, Phone, Search } from "lucide-react";
+import { API_URL, CallCreateResponse, Lead } from "@/lib/api";
 import { TopNav } from "@/components/TopNav";
 
 const seedLeads: Lead[] = [
@@ -39,6 +39,7 @@ export default function ConsultantPage() {
   const [leads, setLeads] = useState<Lead[]>(seedLeads);
   const [query, setQuery] = useState("");
   const [calledIds, setCalledIds] = useState<Set<number>>(new Set([-3]));
+  const [startingLeadId, setStartingLeadId] = useState<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -73,6 +74,28 @@ export default function ConsultantPage() {
   }, [leads, query]);
 
   const newCount = filtered.filter((lead) => !calledIds.has(lead.id) && lead.status !== "CALLED").length;
+
+  async function startCall(lead: Lead) {
+    setStartingLeadId(lead.id);
+    try {
+      const response = await fetch(`${API_URL}/api/calls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lead_id: lead.id }),
+      });
+      if (!response.ok) {
+        throw new Error("Could not start call");
+      }
+      const call = (await response.json()) as CallCreateResponse;
+      const customerUrl = buildCustomerUrl(call);
+      const consultantUrl = `/call/consultant/${call.room_name}?customerUrl=${encodeURIComponent(customerUrl)}`;
+      window.sessionStorage.setItem(`autoelite:${call.room_name}:consultant_token`, call.consultant_token);
+      window.sessionStorage.setItem(`autoelite:${call.room_name}:livekit_url`, call.livekit_url);
+      window.location.href = consultantUrl;
+    } finally {
+      setStartingLeadId(null);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-background text-on-background">
@@ -152,17 +175,27 @@ export default function ConsultantPage() {
                         </span>
                       </td>
                       <td className="px-stack-lg py-stack-lg text-right">
-                        <button
-                          disabled={called}
-                          onClick={() => setCalledIds((current) => new Set(current).add(lead.id))}
-                          className={
-                            called
-                              ? "rounded-DEFAULT border border-outline-variant px-4 py-2 text-sm font-medium text-secondary"
-                              : "rounded-DEFAULT bg-primary px-4 py-2 text-sm font-medium text-on-primary transition active:scale-95 fintech-shadow-hover"
-                          }
-                        >
-                          {called ? "Call Logged" : "Mark as Called"}
-                        </button>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            disabled={startingLeadId === lead.id}
+                            onClick={() => startCall(lead)}
+                            className="inline-flex items-center justify-center gap-2 rounded-DEFAULT bg-primary px-4 py-2 text-sm font-medium text-on-primary transition active:scale-95 disabled:opacity-60 fintech-shadow-hover"
+                          >
+                            <Phone size={16} />
+                            {startingLeadId === lead.id ? "Starting..." : "Start Call"}
+                          </button>
+                          <button
+                            disabled={called}
+                            onClick={() => setCalledIds((current) => new Set(current).add(lead.id))}
+                            className={
+                              called
+                                ? "rounded-DEFAULT border border-outline-variant px-4 py-2 text-sm font-medium text-secondary"
+                                : "rounded-DEFAULT border border-outline-variant bg-white px-4 py-2 text-sm font-medium text-on-surface transition hover:bg-surface-container"
+                            }
+                          >
+                            {called ? "Call Logged" : "Mark Called"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -215,6 +248,15 @@ export default function ConsultantPage() {
       </div>
     </main>
   );
+}
+
+function buildCustomerUrl(call: CallCreateResponse) {
+  const origin = window.location.origin;
+  const params = new URLSearchParams({
+    token: call.customer_token,
+    livekitUrl: call.livekit_url,
+  });
+  return `${origin}/call/customer/${call.room_name}?${params.toString()}`;
 }
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: "success" | "error" }) {

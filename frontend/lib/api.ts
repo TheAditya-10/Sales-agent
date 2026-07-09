@@ -10,3 +10,10 @@ export type Lead = {
   status: string;
   created_at: string;
 };
+
+export type CallCreateResponse = {
+  room_name: string;
+  consultant_token: string;
+  customer_token: string;
+  livekit_url: string;
+};

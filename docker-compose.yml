@@ -9,6 +9,15 @@ services:
     volumes:
       - backend-data:/app/data
 
+  agent:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    command: ["python", "-m", "agent.listener_agent"]
+    depends_on:
+      - backend
+
   frontend:
     build:
       context: ./frontend

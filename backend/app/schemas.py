@@ -10,6 +10,17 @@ class ChatStreamRequest(BaseModel):
     conversation_id: str = Field(min_length=1)
 
 
+class CallCreateRequest(BaseModel):
+    lead_id: int
+
+
+class CallCreateResponse(BaseModel):
+    room_name: str
+    consultant_token: str
+    customer_token: str
+    livekit_url: str
+
+
 class LeadCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     phone: str = Field(min_length=5, max_length=40)
